@@ -1,8 +1,7 @@
 # Fan Control for macOS
 
 A lightweight, native fan control application for macOS with support for Apple Silicon (M1/M2/M3/M4) and Intel Macs.
-
-<img width="1012" height="812" alt="FanControl" src="https://github.com/user-attachments/assets/95be1600-96ab-497b-9dcd-7a5970c44467" />
+<img width="277" height="326" alt="FanControl" src="https://github.com/user-attachments/assets/e52683ae-a72b-4863-8eca-557e5463f3cf" />
 
 ## Features
 
