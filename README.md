@@ -2,6 +2,8 @@
 
 A lightweight, native fan control application for macOS with support for Apple Silicon (M1/M2/M3/M4) and Intel Macs.
 
+<img width="1012" height="812" alt="FanControl" src="https://github.com/user-attachments/assets/95be1600-96ab-497b-9dcd-7a5970c44467" />
+
 ## Features
 
 - 🎛️ **Profile Presets**: Auto, Silent, 50%, 75%, Max, Custom
