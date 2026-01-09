@@ -1,0 +1,26 @@
+# Build artifacts
+*.o
+*.dSYM/
+build/
+dist/
+releases/*.zip
+
+# Swift
+.build/
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+
+# Python (legacy)
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# macOS
+.DS_Store
+*.app
+
+# IDE
+.idea/
+.vscode/
