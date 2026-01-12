@@ -1,10 +1,12 @@
 /*
- * smc.c - Universal SMC Interface
+ * smc.c - SMC Interface with Persistent Wake Loop
+ * Keeps SMC connection open and writes continuously until fan responds
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <IOKit/IOKitLib.h>
 
 #define KERNEL_INDEX_SMC 2
@@ -91,22 +93,87 @@ float SMCGetFanRPM(int n) { char k[5]; snprintf(k, 5, "F%dAc", n); return SMCGet
 float SMCGetFanMin(int n) { char k[5]; snprintf(k, 5, "F%dMn", n); return SMCGetFanFloat(k); }
 float SMCGetFanMax(int n) { char k[5]; snprintf(k, 5, "F%dMx", n); return SMCGetFanFloat(k); }
 
-kern_return_t SMCSetFanRPM(int fan, float rpm) {
-    SMCVal_t val; char key[5];
-    snprintf(key, 5, "F%dMd", fan);
-    if (SMCReadKey(key, &val) == kIOReturnSuccess && val.dataSize > 0) { val.bytes[0] = 1; SMCWriteKey(&val); }
-    snprintf(key, 5, "F%dTg", fan);
+kern_return_t SMCWriteFanFloat(const char *key, float value) {
+    SMCVal_t val;
     if (SMCReadKey(key, &val) != kIOReturnSuccess) return kIOReturnError;
-    if (strcmp(val.dataType, "flt ") == 0) memcpy(val.bytes, &rpm, sizeof(float));
-    else { unsigned short enc = (unsigned short)(rpm * 4.0f); val.bytes[0] = (enc >> 8) & 0xFF; val.bytes[1] = enc & 0xFF; }
+    if (strcmp(val.dataType, "flt ") == 0) memcpy(val.bytes, &value, sizeof(float));
+    else if (strcmp(val.dataType, "fpe2") == 0) {
+        unsigned short enc = (unsigned short)(value * 4.0f);
+        val.bytes[0] = (enc >> 8) & 0xFF; val.bytes[1] = enc & 0xFF;
+    }
     return SMCWriteKey(&val);
 }
 
-kern_return_t SMCSetFanAuto(int fan) {
-    SMCVal_t val; char key[5];
+// Set fan to manual mode
+void SMCSetFanManual(int fan) {
+    char key[5];
+    SMCVal_t val;
     snprintf(key, 5, "F%dMd", fan);
-    if (SMCReadKey(key, &val) == kIOReturnSuccess && val.dataSize > 0) { val.bytes[0] = 0; return SMCWriteKey(&val); }
-    return kIOReturnSuccess;
+    if (SMCReadKey(key, &val) == kIOReturnSuccess && val.dataSize > 0) {
+        val.bytes[0] = 1;
+        SMCWriteKey(&val);
+    }
+}
+
+// PERSISTENT WAKE LOOP - keeps writing until fan responds
+void SMCWakeFan(int fan, float targetRpm, int maxSeconds) {
+    char keyTg[5], keyMn[5];
+    snprintf(keyTg, 5, "F%dTg", fan);
+    snprintf(keyMn, 5, "F%dMn", fan);
+    
+    int maxIterations = maxSeconds * 10; // 100ms per iteration
+    
+    printf("Waking fan %d to %.0f RPM (max %d seconds)...\n", fan, targetRpm, maxSeconds);
+    fflush(stdout);
+    
+    for (int i = 0; i < maxIterations; i++) {
+        // Set manual mode
+        SMCSetFanManual(fan);
+        
+        // Set minimum speed
+        SMCWriteFanFloat(keyMn, targetRpm);
+        
+        // Set target speed
+        SMCWriteFanFloat(keyTg, targetRpm);
+        
+        // Check if fan responded
+        usleep(100000); // 100ms
+        float currentRpm = SMCGetFanRPM(fan);
+        
+        if (currentRpm > 100) {
+            printf("Fan %d woke up! RPM: %.0f (after %d ms)\n", fan, currentRpm, (i + 1) * 100);
+            return;
+        }
+        
+        // Progress indicator every second
+        if ((i + 1) % 10 == 0) {
+            printf("  Still trying... (%d/%d sec)\n", (i + 1) / 10, maxSeconds);
+            fflush(stdout);
+        }
+    }
+    
+    float finalRpm = SMCGetFanRPM(fan);
+    printf("Timeout. Fan %d RPM: %.0f\n", fan, finalRpm);
+}
+
+// Simple set (no wait loop)
+void SMCSetFanRPM(int fan, float rpm) {
+    char key[5];
+    SMCSetFanManual(fan);
+    snprintf(key, 5, "F%dMn", fan);
+    SMCWriteFanFloat(key, rpm);
+    snprintf(key, 5, "F%dTg", fan);
+    SMCWriteFanFloat(key, rpm);
+}
+
+void SMCSetFanAuto(int fan) {
+    char key[5];
+    SMCVal_t val;
+    snprintf(key, 5, "F%dMd", fan);
+    if (SMCReadKey(key, &val) == kIOReturnSuccess && val.dataSize > 0) {
+        val.bytes[0] = 0;
+        SMCWriteKey(&val);
+    }
 }
 
 void listFans(void) {
@@ -118,48 +185,36 @@ void listFans(void) {
 void listSensors(void) {
     double maxCpu = 0, sumCpu = 0;
     int countCpu = 0;
-    
     printf("SENSORS\n");
     
-    // Apple Silicon CPU cores - Tp0* pattern
     char as_cpu_sfx[] = "159DHLPTXbfjnrUV";
     int cpu_num = 1;
     for (int i = 0; as_cpu_sfx[i]; i++) {
-        char key[5];
-        snprintf(key, 5, "Tp0%c", as_cpu_sfx[i]);
+        char key[5]; snprintf(key, 5, "Tp0%c", as_cpu_sfx[i]);
         double temp = SMCGetTemperature(key);
         if (temp > 5.0 && temp < 130.0) {
             printf("TEMP:%s:CPU Core %d:%.1f\n", key, cpu_num++, temp);
-            if (temp > maxCpu) maxCpu = temp;
-            sumCpu += temp; countCpu++;
+            if (temp > maxCpu) maxCpu = temp; sumCpu += temp; countCpu++;
         }
     }
     
-    // Apple Silicon GPU cores - Tg0* pattern
     char as_gpu_sfx[] = "5DLTXbfjnr19HPV";
     int gpu_num = 1;
     for (int i = 0; as_gpu_sfx[i]; i++) {
-        char key[5];
-        snprintf(key, 5, "Tg0%c", as_gpu_sfx[i]);
+        char key[5]; snprintf(key, 5, "Tg0%c", as_gpu_sfx[i]);
         double temp = SMCGetTemperature(key);
-        if (temp > 5.0 && temp < 130.0) {
-            printf("TEMP:%s:GPU Core %d:%.1f\n", key, gpu_num++, temp);
-        }
+        if (temp > 5.0 && temp < 130.0) printf("TEMP:%s:GPU Core %d:%.1f\n", key, gpu_num++, temp);
     }
     
-    // Intel CPU cores - TC*C pattern
     for (int i = 0; i <= 15; i++) {
-        char key[5];
-        snprintf(key, 5, "TC%dC", i);
+        char key[5]; snprintf(key, 5, "TC%dC", i);
         double temp = SMCGetTemperature(key);
         if (temp > 5.0 && temp < 130.0) {
             printf("TEMP:%s:CPU Core %d:%.1f\n", key, i, temp);
-            if (temp > maxCpu) maxCpu = temp;
-            sumCpu += temp; countCpu++;
+            if (temp > maxCpu) maxCpu = temp; sumCpu += temp; countCpu++;
         }
     }
     
-    // System sensors
     struct { const char *key; const char *name; } sys[] = {
         {"TC0P", "CPU Proximity"}, {"TC0D", "CPU Die"}, {"TG0D", "GPU Die"},
         {"TW0P", "Wireless"}, {"Ts0P", "Palm Rest"}, {"Ts1P", "Palm Rest Left"},
@@ -171,8 +226,6 @@ void listSensors(void) {
         double temp = SMCGetTemperature(sys[i].key);
         if (temp > 5.0 && temp < 130.0) printf("TEMP:%s:%s:%.1f\n", sys[i].key, sys[i].name, temp);
     }
-    
-    // Virtual aggregates
     if (countCpu > 0) {
         printf("TEMP:_AVG:Average CPU:%.1f\n", sumCpu / countCpu);
         printf("TEMP:_MAX:Hottest CPU:%.1f\n", maxCpu);
@@ -180,14 +233,40 @@ void listSensors(void) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) { printf("Usage: smc_util -l|-s|-f <n> <rpm>\n"); return 1; }
-    if (SMCOpen() != kIOReturnSuccess) return 1;
-    if (strcmp(argv[1], "-l") == 0) listFans();
-    else if (strcmp(argv[1], "-s") == 0) listSensors();
-    else if (strcmp(argv[1], "-f") == 0 && argc >= 4) {
-        int fan = atoi(argv[2]); float rpm = atof(argv[3]);
-        if (rpm < 0) SMCSetFanAuto(fan); else SMCSetFanRPM(fan, rpm);
-        printf("OK\n");
+    if (argc < 2) {
+        printf("Usage:\n");
+        printf("  smc_util -l                    List fans\n");
+        printf("  smc_util -s                    List sensors\n");
+        printf("  smc_util -f <n> <rpm>          Set fan n to rpm (-1 for auto)\n");
+        printf("  smc_util -w <n> <rpm> [secs]   Wake fan with persistent loop\n");
+        return 1;
     }
-    SMCClose(); return 0;
+    
+    if (SMCOpen() != kIOReturnSuccess) { fprintf(stderr, "Failed to open SMC\n"); return 1; }
+    
+    if (strcmp(argv[1], "-l") == 0) {
+        listFans();
+    } else if (strcmp(argv[1], "-s") == 0) {
+        listSensors();
+    } else if (strcmp(argv[1], "-f") == 0 && argc >= 4) {
+        int fan = atoi(argv[2]);
+        float rpm = atof(argv[3]);
+        if (rpm < 0) {
+            SMCSetFanAuto(fan);
+            printf("OK:auto\n");
+        } else {
+            SMCSetFanRPM(fan, rpm);
+            printf("OK:%.0f\n", rpm);
+        }
+    } else if (strcmp(argv[1], "-w") == 0 && argc >= 4) {
+        int fan = atoi(argv[2]);
+        float rpm = atof(argv[3]);
+        int secs = (argc >= 5) ? atoi(argv[4]) : 30; // Default 30 seconds
+        SMCWakeFan(fan, rpm, secs);
+    } else {
+        printf("Unknown command\n");
+    }
+    
+    SMCClose();
+    return 0;
 }

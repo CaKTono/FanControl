@@ -48,8 +48,8 @@ enum FanProfile: String, CaseIterable {
         switch self {
         case .auto: return nil
         case .silent: return min
-        case .fifty: return min + (max - min) * 0.5
-        case .seventyFive: return min + (max - min) * 0.75
+        case .fifty: return max * 0.5
+        case .seventyFive: return max * 0.75
         case .max: return max
         case .custom: return nil
         }
@@ -64,7 +64,7 @@ struct Fan: Identifiable {
     var isAuto: Bool = true
     var targetRpm: Double = 0
     var percentage: Int { guard maxRpm > 0 else { return 0 }; return Int((rpm / maxRpm) * 100) }
-    func rpmForPercentage(_ pct: Double) -> Double { maxRpm * (pct / 100.0) }
+    func rpmForPercentage(_ pct: Double) -> Double { max(0, maxRpm * (pct / 100.0)) }
 }
 
 struct Sensor: Identifiable, Equatable {
@@ -176,14 +176,16 @@ class SMCManager: ObservableObject {
     }
     
     func setFanSpeed(fanIndex: Int, rpm: Double, silent: Bool = false) {
-        let output = helperInstalled ? runSMC(["-f", String(fanIndex), String(Int(rpm))]) : runSMCWithPriv(["-f", String(fanIndex), String(Int(rpm))])
-        if output != nil {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let _ = self.helperInstalled ? self.runSMC(["-f", String(fanIndex), String(Int(rpm))]) : self.runSMCWithPriv(["-f", String(fanIndex), String(Int(rpm))])
             DispatchQueue.main.async {
                 if !silent { self.statusMessage = "Fan \(fanIndex + 1): \(Int(rpm)) RPM" }
-                if let idx = self.fans.firstIndex(where: { $0.id == fanIndex }) { self.fans[idx].isAuto = false; self.fans[idx].targetRpm = rpm }
+                if let idx = self.fans.firstIndex(where: { $0.id == fanIndex }) {
+                    self.fans[idx].isAuto = false
+                    self.fans[idx].targetRpm = rpm
+                }
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.loadFans() }
     }
     
     func setFanAuto(fanIndex: Int) {
@@ -276,26 +278,17 @@ class MenuBarController: NSObject, ObservableObject {
     
     func updateMenuBarTitle() {
         smc.refresh()
-        
         let modeStr = UserDefaults.standard.string(forKey: "menuBarDisplayMode") ?? MenuBarDisplayMode.cpuAndRPM.rawValue
         let mode = MenuBarDisplayMode(rawValue: modeStr) ?? .cpuAndRPM
-        
         var title = ""
         switch mode {
-        case .cpuTemp:
-            title = "\(Int(smc.hottestCPU))°C"
-        case .gpuTemp:
-            title = "\(Int(smc.hottestGPU))°C"
-        case .fanRPM:
-            title = "\(smc.avgFanRPM) RPM"
-        case .fanPercent:
-            title = "\(smc.avgFanPercent)%"
-        case .cpuAndRPM:
-            title = "\(Int(smc.hottestCPU))° \(smc.avgFanRPM)rpm"
-        case .cpuAndPercent:
-            title = "\(Int(smc.hottestCPU))° \(smc.avgFanPercent)%"
+        case .cpuTemp: title = "\(Int(smc.hottestCPU))°C"
+        case .gpuTemp: title = "\(Int(smc.hottestGPU))°C"
+        case .fanRPM: title = "\(smc.avgFanRPM) RPM"
+        case .fanPercent: title = "\(smc.avgFanPercent)%"
+        case .cpuAndRPM: title = "\(Int(smc.hottestCPU))° \(smc.avgFanRPM)rpm"
+        case .cpuAndPercent: title = "\(Int(smc.hottestCPU))° \(smc.avgFanPercent)%"
         }
-        
         DispatchQueue.main.async {
             self.statusItem?.button?.title = title
             self.statusItem?.button?.image = NSImage(systemSymbolName: "fan.fill", accessibilityDescription: nil)
@@ -304,12 +297,10 @@ class MenuBarController: NSObject, ObservableObject {
     
     func setupMenu() {
         let menu = NSMenu()
-        
         let headerItem = NSMenuItem(title: "Fan Control", action: nil, keyEquivalent: "")
         headerItem.isEnabled = false
         menu.addItem(headerItem)
         menu.addItem(NSMenuItem.separator())
-        
         let profileMenu = NSMenu()
         for profile in FanProfile.allCases {
             let item = NSMenuItem(title: profile.rawValue, action: #selector(selectProfile(_:)), keyEquivalent: "")
@@ -321,34 +312,24 @@ class MenuBarController: NSObject, ObservableObject {
         let profileItem = NSMenuItem(title: "Profile", action: nil, keyEquivalent: "")
         profileItem.submenu = profileMenu
         menu.addItem(profileItem)
-        
         menu.addItem(NSMenuItem.separator())
-        
         let openItem = NSMenuItem(title: "Open Fan Control", action: #selector(openMainWindow), keyEquivalent: "o")
         openItem.target = self
         menu.addItem(openItem)
-        
         menu.addItem(NSMenuItem.separator())
-        
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
-        
         statusItem?.menu = menu
     }
     
     @objc func selectProfile(_ sender: NSMenuItem) {
-        if let profile = sender.representedObject as? FanProfile {
-            smc.applyProfile(profile)
-            setupMenu()
-        }
+        if let profile = sender.representedObject as? FanProfile { smc.applyProfile(profile); setupMenu() }
     }
-    
     @objc func openMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
         if let window = NSApp.windows.first { window.makeKeyAndOrderFront(nil) }
     }
-    
     @objc func quitApp() { NSApplication.shared.terminate(nil) }
 }
 
@@ -361,8 +342,6 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Settings").font(.title2).fontWeight(.semibold)
             Divider()
-            
-            // Helper section
             VStack(alignment: .leading, spacing: 8) {
                 Text("PRIVILEGED HELPER").font(.caption).foregroundColor(.secondary)
                 HStack {
@@ -375,28 +354,19 @@ struct SettingsView: View {
                     if smc.helperInstalled { Button("Uninstall") { smc.uninstallHelper() }.buttonStyle(.bordered) }
                 }
             }.padding().background(Color(NSColor.controlBackgroundColor)).cornerRadius(8)
-            
-            // Menu Bar section
             VStack(alignment: .leading, spacing: 8) {
                 Text("MENU BAR").font(.caption).foregroundColor(.secondary)
                 Toggle("Show in Menu Bar", isOn: $settings.showInMenuBar)
-                
                 if settings.showInMenuBar {
                     Picker("Display", selection: $settings.menuBarDisplayMode) {
-                        ForEach(MenuBarDisplayMode.allCases, id: \.self) { mode in
-                            Text(mode.rawValue).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.menu)
+                        ForEach(MenuBarDisplayMode.allCases, id: \.self) { mode in Text(mode.rawValue).tag(mode) }
+                    }.pickerStyle(.menu)
                 }
             }.padding().background(Color(NSColor.controlBackgroundColor)).cornerRadius(8)
-            
-            // Startup section
             VStack(alignment: .leading, spacing: 8) {
                 Text("STARTUP").font(.caption).foregroundColor(.secondary)
                 Toggle("Launch at Login", isOn: $settings.launchAtLogin)
             }.padding().background(Color(NSColor.controlBackgroundColor)).cornerRadius(8)
-            
             Spacer()
             HStack { Spacer(); Button("Done") { dismiss() }.buttonStyle(.borderedProminent) }
         }.padding(20).frame(width: 350, height: 420)
@@ -418,9 +388,12 @@ struct ProfileButton: View {
 }
 
 struct FanSliderView: View {
-    let fan: Fan; @Binding var percentage: Double
-    let onPercentageChange: (Double) -> Void; let onAutoTap: () -> Void
+    let fan: Fan
+    @Binding var percentage: Double
+    let onPercentageChange: (Double, @escaping () -> Void) -> Void
+    let onAutoTap: () -> Void
     var fanName: String { fan.id == 0 ? "Left" : "Right" }
+    
     var body: some View {
         VStack(spacing: 8) {
             HStack { Text(fanName).font(.headline); Spacer(); Text("\(fan.percentage)%").font(.headline).foregroundColor(.blue) }
@@ -428,9 +401,13 @@ struct FanSliderView: View {
                 Button("Auto") { onAutoTap() }.buttonStyle(.bordered).tint(fan.isAuto ? .blue : .gray).controlSize(.small)
                 Button("Manual") {}.buttonStyle(.bordered).tint(fan.isAuto ? .gray : .blue).controlSize(.small).disabled(true)
             }
-            Slider(value: $percentage, in: 0...100, step: 1) { editing in if !editing { onPercentageChange(percentage) } }.tint(.blue)
+            Slider(value: $percentage, in: 0...100, step: 1) { editing in
+                if !editing {
+                    onPercentageChange(percentage) {}
+                }
+            }.tint(.blue)
             HStack {
-                Text("\(Int(fan.minRpm))").font(.caption).padding(4).background(Color(NSColor.controlBackgroundColor)).cornerRadius(4)
+                Text("0").font(.caption).padding(4).background(Color(NSColor.controlBackgroundColor)).cornerRadius(4)
                 Spacer(); Text("\(Int(fan.rpm)) RPM").font(.caption).foregroundColor(.secondary); Spacer()
                 Text("\(Int(fan.maxRpm))").font(.caption).padding(4).background(Color(NSColor.controlBackgroundColor)).cornerRadius(4)
             }
@@ -439,12 +416,20 @@ struct FanSliderView: View {
 }
 
 struct AllFansSliderView: View {
-    @Binding var percentage: Double; let minRpm: Double; let maxRpm: Double; let onPercentageChange: (Double) -> Void
-    var currentRpm: Double { minRpm + (maxRpm - minRpm) * (percentage / 100.0) }
+    @Binding var percentage: Double
+    let minRpm: Double
+    let maxRpm: Double
+    let onPercentageChange: (Double, @escaping () -> Void) -> Void
+    var currentRpm: Double { maxRpm * (percentage / 100.0) }
+    
     var body: some View {
         VStack(spacing: 8) {
             HStack { Image(systemName: "link").foregroundColor(.purple); Text("All Fans").font(.headline); Spacer(); Text("\(Int(percentage))%").font(.headline).foregroundColor(.purple) }
-            Slider(value: $percentage, in: 0...100, step: 1) { editing in if !editing { onPercentageChange(percentage) } }.tint(.purple)
+            Slider(value: $percentage, in: 0...100, step: 1) { editing in
+                if !editing {
+                    onPercentageChange(percentage) {}
+                }
+            }.tint(.purple)
             HStack { Text("0%").font(.caption); Spacer(); Text("\(Int(currentRpm)) RPM").font(.caption).foregroundColor(.secondary); Spacer(); Text("100%").font(.caption) }
         }.padding().background(Color.purple.opacity(0.1)).cornerRadius(10)
     }
@@ -489,6 +474,17 @@ struct ContentView: View {
     @State private var timer: Timer?
     @State private var showSettings = false
     @State private var fanPercentages: [Int: Double] = [:]
+    @State private var showZeroWarning = false
+    @State private var pendingZeroAction: (() -> Void)?
+    
+    func handlePercentageChange(_ pct: Double, action: @escaping () -> Void) {
+        if pct < 5 {
+            pendingZeroAction = action
+            showZeroWarning = true
+        } else {
+            action()
+        }
+    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -512,9 +508,36 @@ struct ContentView: View {
                         ForEach(smc.fans) { fan in FanCardView(fan: fan) }
                         if smc.currentProfile == .custom {
                             Divider().padding(.vertical, 4)
-                            AllFansSliderView(percentage: $smc.allFansPercentage, minRpm: smc.fans.first?.minRpm ?? 0, maxRpm: smc.fans.first?.maxRpm ?? 100, onPercentageChange: { smc.setAllFansPercentage($0) })
+                            AllFansSliderView(
+                                percentage: $smc.allFansPercentage,
+                                minRpm: 0,
+                                maxRpm: smc.fans.first?.maxRpm ?? 100,
+                                onPercentageChange: { pct, _ in
+                                    if pct < 5 {
+                                        pendingZeroAction = { smc.setAllFansPercentage(pct) }
+                                        showZeroWarning = true
+                                    } else {
+                                        smc.setAllFansPercentage(pct)
+                                    }
+                                }
+                            )
                             ForEach(smc.fans) { fan in
-                                FanSliderView(fan: fan, percentage: Binding(get: { fanPercentages[fan.id] ?? Double(fan.percentage) }, set: { fanPercentages[fan.id] = $0 }), onPercentageChange: { smc.setFanPercentage(fanIndex: fan.id, pct: $0) }, onAutoTap: { smc.setFanAuto(fanIndex: fan.id) })
+                                FanSliderView(
+                                    fan: fan,
+                                    percentage: Binding(
+                                        get: { fanPercentages[fan.id] ?? Double(fan.percentage) },
+                                        set: { fanPercentages[fan.id] = $0 }
+                                    ),
+                                    onPercentageChange: { pct, _ in
+                                        if pct < 5 {
+                                            pendingZeroAction = { smc.setFanPercentage(fanIndex: fan.id, pct: pct) }
+                                            showZeroWarning = true
+                                        } else {
+                                            smc.setFanPercentage(fanIndex: fan.id, pct: pct)
+                                        }
+                                    },
+                                    onAutoTap: { smc.setFanAuto(fanIndex: fan.id) }
+                                )
                             }
                         }
                     }.padding(10)
@@ -532,6 +555,15 @@ struct ContentView: View {
         }
         .onDisappear { timer?.invalidate() }
         .sheet(isPresented: $showSettings) { SettingsView(smc: smc, settings: settings) }
+        .alert("⚠️ Warning: Turn Fan Off?", isPresented: $showZeroWarning) {
+            Button("Cancel", role: .cancel) { pendingZeroAction = nil }
+            Button("Turn Off", role: .destructive) {
+                pendingZeroAction?()
+                pendingZeroAction = nil
+            }
+        } message: {
+            Text("Setting fan below 5% may cause your Mac to overheat and could damage components. Only proceed if you understand the risks.")
+        }
     }
 }
 
